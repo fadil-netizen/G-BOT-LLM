@@ -5,7 +5,8 @@ const {
     useMultiFileAuthState, 
     DisconnectReason,
     downloadContentFromMessage, 
-} = require('@whiskeysockets/baileys');
+} 
+= require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const setting = require('./setting'); 
@@ -14,6 +15,17 @@ const mammoth = require('mammoth');
 const XLSX = require('xlsx'); 
 const pptx2json = require('pptx2json'); 
 const fs = require('fs'); 
+const path = require('path');
+// --- Pustaka Tambahan untuk QR Code ---
+const Jimp = require('jimp'); 
+const jsQR = require('jsqr'); 
+
+
+// --- KONSTANTA BARU: Batas Ukuran File (Dua Batasan) ---
+const MAX_DOC_SIZE_BYTES = 100 * 1024 * 1024;   // 100 MB untuk Dokumen
+const MAX_MEDIA_SIZE_BYTES = 250 * 1024 * 1024; // 250 MB untuk Gambar & Video
+// ----------------------------------------------------
+
 
 const ai = setting.GEMINI_AI_INSTANCE;
 const PREFIX = setting.PREFIX;
@@ -25,12 +37,41 @@ const GOOGLE_SEARCH_CONFIG = setting.GOOGLE_SEARCH_CONFIG;
 const PRIVATE_CHAT_STATUS = setting.PRIVATE_CHAT_STATUS; 
 
 
+// --- FUNGSI BARU UNTUK DECODE QR CODE ---
+/**
+ * Memindai QR Code dari buffer gambar.
+ * @param {Buffer} buffer Buffer gambar.
+ * @returns {Promise<string|null>} Teks QR Code atau null jika tidak ditemukan/gagal.
+ */
+async function decodeQrCode(buffer) {
+    try {
+        const image = await Jimp.read(buffer);
+        // jsqr membutuhkan array data mentah (Uint8ClampedArray)
+        const qrCode = jsQR(
+            new Uint8ClampedArray(image.bitmap.data.buffer),
+            image.bitmap.width,
+            image.bitmap.height
+        );
+
+        if (qrCode) {
+            return qrCode.data;
+        } else {
+            return null; // QR Code tidak terdeteksi
+        }
+    } catch (error) {
+        console.error("Gagal memindai QR Code:", error.message);
+        return null; // Terjadi kesalahan saat pemrosesan
+    }
+}
+
+
 // --- FUNGSI BARU UNTUK MENGIRIM GAMBAR COMMAND (/norek) ---
 async function handleSendImageCommand(sock, from, imagePath, caption) {
     try {
         await sock.sendPresenceUpdate('composing', from); 
 
         if (!fs.existsSync(imagePath)) {
+            // Beri tahu pengguna jika file gambar tidak ditemukan
             await sock.sendMessage(from, { text: `⚠️ Maaf, file gambar di path \`${imagePath}\` tidak ditemukan di server. Pastikan file ada di path tersebut.` });
             return;
         }
@@ -51,7 +92,7 @@ async function handleSendImageCommand(sock, from, imagePath, caption) {
 }
 
 
-// --- Fungsi Helper untuk Multimodal (Gambar, Video & Dokumen) ---
+// --- Fungsi Helper untuk Multimodal (Gambar, Video & Dokumen) - INLINE ---
 function bufferToGenerativePart(buffer, mimeType) {
     return {
         inlineData: {
@@ -62,8 +103,57 @@ function bufferToGenerativePart(buffer, mimeType) {
 }
 
 
+// --- Fungsi Helper untuk Multimodal (Gambar, Video & Dokumen) - URI (YouTube) ---
+function uriToGenerativePart(uri, mimeType) {
+    return {
+        fileData: {
+            fileUri: uri,
+            mimeType: mimeType // Gunakan mimeType yang sesuai untuk video, misalnya 'video/youtube' atau biarkan generik
+        },
+    };
+}
+
+
+// --- Fungsi Helper Baru untuk Deteksi URL YouTube ---
+function extractYoutubeUrl(text) {
+    // Regex untuk mendeteksi berbagai format URL YouTube, termasuk youtu.be dan m.youtube.com
+    const youtubeRegex = /(?:https?:\/\/)?(?:www\.)?(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})(?:\S+)?/i;
+    const match = text.match(youtubeRegex);
+    
+    if (match && match[0]) {
+        return match[0]; // Mengembalikan URL lengkap
+    }
+    return null;
+}
+
+
+/**
+ * Fungsi untuk menyorot pola waktu (timestamp) di dalam teks.
+ * Ini memastikan referensi waktu dari analisis video terlihat jelas.
+ */
+function highlightTimestamps(text) {
+    // Regex untuk mendeteksi format timestamp umum: 
+    // x:yy (contoh: 0:30, 10:05), x:yy:zz (contoh: 01:20:45)
+    // dan juga jika timestamp dikurung [] atau ()
+    const timestampRegex = /(\b\d{1,2}:\d{2}(:\d{2})?\b)|(\(\d{1,2}:\d{2}(:\d{2})?\))|(\[\d{1,2}:\d{2}(:\d{2})?\])/g;
+
+    // Ganti setiap timestamp yang terdeteksi dengan format yang lebih menonjol (bold dan backtick)
+    return text.replace(timestampRegex, (match) => {
+        // Hapus tanda kurung jika ada (misal dari menjadi 0:45)
+        const cleanMatch = match.replace(/[\(\)\[\]]/g, '');
+        return `*⏱️ \`${cleanMatch}\`*`; 
+    });
+}
+
+
 // --- Fungsi Helper Ekstraksi Dokumen ---
 async function extractTextFromDocument(buffer, mimeType) {
+    // KODE BARU: Langsung kembalikan null untuk file yang bisa dihandle langsung oleh Gemini API
+    // Termasuk PDF, TXT, dan semua file kode yang MIME-nya dimulai dengan 'text/' atau 'application/json'
+    if (mimeType === 'application/pdf' || mimeType === 'text/plain' || mimeType.startsWith('text/') || mimeType === 'application/json' || mimeType === 'application/javascript') {
+        return null; // Tidak perlu ekstraksi lokal, kirim langsung sebagai GenerativePart.
+    }
+
     // Ekstraksi DOCX/DOC
     if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || mimeType === 'application/msword') {
         try {
@@ -116,6 +206,7 @@ async function extractTextFromDocument(buffer, mimeType) {
             return "*[GAGAL EKSTRAKSI DARI PPTX]*. Coba lagi atau pastikan format file valid.";
         }
     }
+    // PDF dan TXT akan ditangani langsung oleh Gemini sebagai inlineData/filePart
     return `*Dokumen Tipe Tidak Dikenal:* ${mimeType}`;
 }
 
@@ -198,25 +289,40 @@ async function handleGeminiRequest(sock, from, textQuery, mediaParts = []) {
         let contents = [...mediaParts];
         let finalQuery;
 
+        // Tambahkan query teks ke contents
         if (textQuery.length > 0) {
             finalQuery = `${contextInjection}\n\n*Permintaan Pengguna:*\n${textQuery}`;
             contents.push(finalQuery);
         } 
+        // Default query jika hanya ada media tanpa teks instruksi
         else if (mediaParts.length > 0) {
-             const mediaType = mediaParts[0].inlineData.mimeType.startsWith('image') ? 'gambar' : 
-                               mediaParts[0].inlineData.mimeType.startsWith('video') ? 'video' : 'dokumen';
+             const mediaType = mediaParts.some(p => p.fileData) ? 'video/URI' : (mediaParts[0].inlineData.mimeType.startsWith('image') ? 'gambar' : 'dokumen');
              finalQuery = `${contextInjection}\n\n*Permintaan Default:*\nAnalisis ${mediaType} ini secara sangat mendalam dan detail.`;
              contents.push(finalQuery);
         } 
+        // Default greeting
         else {
              finalQuery = 
                 `${contextInjection}\n\n*Permintaan Default:*\nHalo! Saya Gemini. Anda bisa mengajukan pertanyaan, mengirim gambar, video, dokumen (PDF/TXT/DOCX/XLSX/PPTX), atau *voice note* setelah me-*tag* saya. Ketik ${PREFIX}menu untuk melihat daftar perintah.`;
              contents.push(finalQuery);
         }
         
-        const response = await chat.sendMessage({ message: contents });
+        // Cek apakah contents hanya berisi satu string (kasus non-media), ubah formatnya
+        const finalContents = mediaParts.length === 0 && contents.length === 1 ? contents[0] : contents;
 
-        const geminiResponse = response.text.trim();
+        const response = await chat.sendMessage({ message: finalContents });
+
+        let geminiResponse = response.text.trim();
+        
+        // --- MODIFIKASI: Sorot Timestamp/Menit di sini ---
+        // Cek apakah ada part yang merupakan video/youtube
+        const isYoutubeAnalysis = mediaParts.some(part => part.fileData && part.fileData.mimeType === 'video/youtube');
+        
+        if (isYoutubeAnalysis) {
+             // Terapkan penyorotan timestamp
+             geminiResponse = highlightTimestamps(geminiResponse);
+        }
+        // ----------------------------------------------------
         
         const modelName = currentModel === MODELS.FAST ? 'Fast Mode (gemini-2.5-flash)' : 'Smart Mode (gemini-2.5-pro)';
         const finalResponse =`*💠 Mode Aktif:* \`${modelName}\`\n${geminiResponse}`;
@@ -225,7 +331,7 @@ async function handleGeminiRequest(sock, from, textQuery, mediaParts = []) {
 
     } catch (error) {
         console.error("Gagal memproses pesan dengan Gemini AI:", error);
-        await sock.sendMessage(from, { text: "Maaf, terjadi kesalahan saat menghubungi Gemini AI. Pastikan file adalah format yang didukung (Gambar/Video/Dokumen) dan ukurannya tidak terlalu besar." });
+        await sock.sendMessage(from, { text: "Maaf, terjadi kesalahan saat menghubungi Gemini AI. Pastikan file adalah format yang didukung (Gambar/Video/Dokumen/URL YouTube) dan ukurannya tidak terlalu besar." });
     } finally {
         await sock.sendPresenceUpdate('available', from); 
     }
@@ -324,7 +430,7 @@ async function startSock() {
                 console.log('Koneksi ditutup. Anda telah logout.');
             }
         } else if (connection === 'open') {
-            console.log('Bot siap digunakan! Ingatan Otomatis, Multimodal (Gambar, Video & Dokumen), Mode Cerdas, dan Google Search Aktif.');
+            console.log('Bot siap digunakan! Ingatan Otomatis, Multimodal (Gambar, Video & Dokumen, URL YouTube), Mode Cerdas, dan Google Search Aktif.');
         }
     });
 
@@ -345,7 +451,7 @@ async function startSock() {
         const args = messageText.slice(command.length).trim();
 
         // ----------------------------------------------------------------------
-        // --- LOGIKA PESAN SELAMAT DATANG PERTAMA KALI ---
+        // --- LOGIKA PESAN SELAMAT DATANG PERTAMA KALI (Pribadi) ---
         // ----------------------------------------------------------------------
         
         if (!isGroup) {
@@ -364,7 +470,7 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
     (untuk keluar dari percakapan chatbot dan kembali menghubungi nomor ini).
 
 *Petunjuk Singkat:*
-- Untuk bertanya/kirim media dengan chatbot, aktifkan sesi dengan \`2\` terlebih dahulu.
+- Untuk bertanya/kirim media dengan chatbot, aktifkan sesi dengan mengetik \`2\` terlebih dahulu.
 - Ketik \`${PREFIX}menu\` untuk melihat daftar fitur lengkap.
                 `.trim();
 
@@ -385,7 +491,7 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
 
             if (rawText === '2') {
                 PRIVATE_CHAT_STATUS.set(from, true);
-                await sock.sendMessage(from, { text: `✅ *Sesi Chatbot Gemini telah diaktifkan!* Anda sekarang bisa langsung bertanya atau kirim media. Ketik \`1\` untuk keluar dari sesi.` });
+                await sock.sendMessage(from, { text: `✅ *Sesi Chatbot Gemini telah diaktifkan!* Anda sekarang bisa langsung bertanya, kirim media, atau URL. Ketik \`1\` untuk keluar dari sesi.` });
                 return; 
             }
             if (rawText === '1') {
@@ -395,7 +501,8 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
                 return;
             }
             
-            if (!currentStatus && !messageText.toLowerCase().startsWith(PREFIX)) {
+            // Jika status tidak aktif DAN pesan bukan command, abaikan
+            if (currentStatus === false && !messageText.toLowerCase().startsWith(PREFIX)) {
                 return;
             }
         }
@@ -404,8 +511,8 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
         
         // --- FITUR BARU: /norek ---
         if (command === `${PREFIX}norek`) {
-             // 🛑 PATH GAMBAR DITENTUKAN DI SINI
-             const imagePath = './assets/norek_info.png'; 
+             // PATH GAMBAR DITENTUKAN DI SINI
+             const imagePath = path.join(__dirname, 'assets', 'norek_info.png'); 
              const caption = '*Berikut adalah informasi rekening dan QR Code untuk transfer.*';
              await handleSendImageCommand(sock, from, imagePath, caption);
              return;
@@ -463,23 +570,62 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
             }
         } 
         
-        // A1. Pesan Gambar Langsung atau Balasan Gambar
+        // A1. Pesan Gambar Langsung atau Balasan Gambar (TERMASUK QR CODE SCANNING)
         if (messageType === 'imageMessage' || (messageType === 'extendedTextMessage' && m.message.extendedTextMessage.contextInfo?.quotedMessage?.imageMessage)) {
              const imageMsg = messageType === 'imageMessage' ? m.message.imageMessage : m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
              
+             // --- PENGECEKAN BATAS UKURAN (IMAGE) ---
+             if (imageMsg.fileLength > MAX_MEDIA_SIZE_BYTES) {
+                 await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran gambar melebihi batas maksimum *250 MB* (*${(MAX_MEDIA_SIZE_BYTES / 1024 / 1024).toFixed(0)} MB*).` });
+                 await sock.sendPresenceUpdate('available', from);
+                 return;
+             }
+             // -----------------------------------------
+
+             await sock.sendPresenceUpdate('composing', from); // Tunjukkan "typing" saat memproses
+
              const stream = await downloadContentFromMessage(imageMsg, 'image');
              let buffer = Buffer.from([]);
              for await (const chunk of stream) {
                  buffer = Buffer.concat([buffer, chunk]);
              }
+             
+             // --- LOGIKA SCANNER QR CODE BARU ---
+             const qrData = await decodeQrCode(buffer);
+
+             if (qrData) {
+                 // 1. Kirim hasil QR code secara langsung
+                 await sock.sendMessage(from, { text: `*✅ QR Code Ditemukan!*:\n\`\`\`\n${qrData}\n\`\`\`` });
+                 
+                 // 2. Tambahkan data QR ke prompt untuk analisis Gemini
+                 const qrPrompt = `QR Code di gambar ini berisi data: "${qrData}". Analisis data QR Code ini dan juga gambar keseluruhan, lalu balas pesan ini.`;
+                 queryText = queryText.length > 0 ? `${qrPrompt}\n\n*Instruksi Pengguna Tambahan:*\n${queryText}` : qrPrompt;
+                 
+             } else {
+                 // Jika QR Code TIDAK ditemukan, berikan prompt default ke Gemini jika tidak ada instruksi teks
+                 if (queryText.length === 0) {
+                     queryText = "Analisis gambar ini secara mendalam.";
+                 }
+                 console.log("[QR SCANNER] QR Code tidak terdeteksi. Melanjutkan ke analisis gambar Gemini...");
+             }
+
+             // --- Akhir Logika QR Code ---
 
              mediaParts.push(bufferToGenerativePart(buffer, imageMsg.mimetype));
              isGeminiQuery = true;
         }
         
-        // A2. Pesan Video Langsung atau Balasan Video (LOGIKA BARU)
+        // A2. Pesan Video Langsung atau Balasan Video
         else if (messageType === 'videoMessage' || (messageType === 'extendedTextMessage' && m.message.extendedTextMessage.contextInfo?.quotedMessage?.videoMessage)) {
             const videoMsg = messageType === 'videoMessage' ? m.message.videoMessage : m.message.extendedTextMessage.contextInfo.quotedMessage.videoMessage;
+            
+            // --- PENGECEKAN BATAS UKURAN (VIDEO) ---
+            if (videoMsg.fileLength > MAX_MEDIA_SIZE_BYTES) {
+                await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran video melebihi batas maksimum *250 MB* (*${(MAX_MEDIA_SIZE_BYTES / 1024 / 1024).toFixed(0)} MB*).` });
+                await sock.sendPresenceUpdate('available', from);
+                return;
+            }
+            // -----------------------------------------
 
             await sock.sendPresenceUpdate('composing', from); 
             
@@ -504,16 +650,55 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
 
             const mimeType = documentMsg.mimetype;
             const validMimeTypes = [
+                // Dokumen Utama Gemini API Support:
                 'application/pdf', 
                 'text/plain',
+                // Tipe Kode/Teks Umum:
+                'text/html', 
+                'application/json',
+                'text/css', 
+                'text/javascript', 
+                'text/x-python', 
+                'text/markdown',
+                'application/x-sh', 
+                'text/x-c', 'text/x-c++', 
+                'text/x-java', 
+                'text/xml', 
+                // Dokumen yang diekstrak lokal:
                 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 
                 'application/msword', 
                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
                 'application/vnd.ms-excel', 
                 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
             ];
+            
+            const fileName = documentMsg.fileName || '';
+            const isCustomTextFile = fileName.toLowerCase().endsWith('.mcx-5') || 
+                                     fileName.toLowerCase().endsWith('.log') || 
+                                     fileName.toLowerCase().endsWith('.dat') ||
+                                     fileName.toLowerCase().endsWith('.cfg') ||
+                                     fileName.toLowerCase().endsWith('.ini') ||
+                                     fileName.toLowerCase().endsWith('.txt');
 
-            if (validMimeTypes.includes(mimeType)) {
+            let geminiMimeType = mimeType;
+            // Jika file adalah tipe teks kustom/tidak dikenal, perlakukan sebagai text/plain
+            if (isCustomTextFile && !validMimeTypes.includes(mimeType)) {
+                 geminiMimeType = 'text/plain';
+                 console.log(`[DOC ANALYZER] File kustom (${fileName}) ditandai sebagai ${geminiMimeType}.`);
+            }
+
+
+            if (validMimeTypes.includes(mimeType) || mimeType.startsWith('text/') || isCustomTextFile) {
+
+                // --- PENGECEKAN BATAS UKURAN (DOKUMEN) ---
+                if (documentMsg.fileLength > MAX_DOC_SIZE_BYTES) {
+                    await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran dokumen melebihi batas maksimum *100 MB* (*${(MAX_DOC_SIZE_BYTES / 1024 / 1024).toFixed(0)} MB*).` });
+                    await sock.sendPresenceUpdate('available', from);
+                    return;
+                }
+                // -----------------------------------------
+
+
                 await sock.sendPresenceUpdate('composing', from); 
 
                 const stream = await downloadContentFromMessage(documentMsg, 'document');
@@ -522,16 +707,23 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
                     buffer = Buffer.concat([buffer, chunk]);
                 }
                 
-                if (mimeType === 'application/pdf' || mimeType === 'text/plain') {
-                    mediaParts.push(bufferToGenerativePart(buffer, mimeType));
-                } 
-                else {
-                    documentExtractedText = await extractTextFromDocument(buffer, mimeType);
-                }
+                // Coba ekstraksi teks lokal (hanya akan memproses DOCX, XLSX, PPTX)
+                documentExtractedText = await extractTextFromDocument(buffer, mimeType);
                 
+                if (documentExtractedText) {
+                    // File ter-ekstrak secara lokal (DOCX, XLSX, PPTX)
+                    console.log(`[DOC ANALYZER] Dokumen ${mimeType} berhasil diekstrak secara lokal.`);
+                } else {
+                    // File yang didukung langsung oleh Gemini (PDF, TXT, Kode, dll.)
+                    // Menggunakan geminiMimeType yang mungkin sudah diubah menjadi 'text/plain'
+                    mediaParts.push(bufferToGenerativePart(buffer, geminiMimeType));
+                    console.log(`[GEMINI API] File ${geminiMimeType} dikirim langsung ke Gemini API.`);
+                }
+
                 isGeminiQuery = true;
+
             } else if (messageType === 'documentMessage') {
-                await sock.sendMessage(from, { text: `⚠️ Maaf, tipe file dokumen \`${mimeType}\` belum didukung. Hanya mendukung *PDF, TXT, DOCX/DOC, XLSX/XLS*, dan *PPTX*.` });
+                await sock.sendMessage(from, { text: `⚠️ Maaf, tipe file dokumen \`${mimeType}\` belum didukung. Hanya mendukung *PDF, TXT, DOCX/DOC, XLSX/XLS, PPTX*, dan berbagai tipe file *kode/teks* lainnya.` });
                 await sock.sendPresenceUpdate('available', from);
                 return;
             }
@@ -563,14 +755,37 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
             }
         }
         
-        // D. Perintah Teks
+        // D. Deteksi URL YouTube (LOGIKA BARU)
+        const youtubeUrl = extractYoutubeUrl(queryText);
+        let youtubePart = null;
+        
+        if (youtubeUrl) {
+             youtubePart = uriToGenerativePart(youtubeUrl, 'video/youtube'); 
+             mediaParts.push(youtubePart);
+             isGeminiQuery = true;
+             
+             // Hapus URL dari queryText agar Gemini fokus pada instruksi, bukan URL-nya sendiri
+             queryText = queryText.replace(youtubeUrl, '').trim(); 
+        }
+
+        // E. Perintah Teks (Jika ada teks tersisa DAN belum ada media/YouTube)
         if (queryText.length > 0 && !isGeminiQuery) {
             isGeminiQuery = true;
         }
-        
-        // E. Gabungkan Query Teks dan Teks Ekstraksi Dokumen
+
+        // F. Gabungkan Query Teks, Teks Ekstraksi Dokumen, dan Query YouTube Default
         if (documentExtractedText) {
+             // Jika dokumen diekstrak secara lokal (DOCX, XLSX, PPTX)
              queryText = `${documentExtractedText}\n\n*Permintaan Analisis Pengguna:*\n${queryText.length > 0 ? queryText : 'Mohon analisis dokumen ini.'}`;
+        } else if (youtubePart) {
+             // Jika hanya ada URL YouTube dan tidak ada teks instruksi, berikan prompt default
+             if (queryText.length === 0) {
+                 queryText = 'Mohon berikan ringkasan yang detail dan analisis mendalam dari video YouTube ini. Sertakan poin-poin penting dan kesimpulan.';
+             }
+        } else if (mediaParts.length > 0 && queryText.length === 0) {
+             // Jika ada media yang dikirim langsung (PDF, Kode, Gambar, Video) tanpa instruksi
+             const mediaType = mediaParts[0].inlineData ? (mediaParts[0].inlineData.mimeType.startsWith('image') ? 'gambar' : 'dokumen') : 'media';
+             queryText = `Mohon analisis ${mediaType} yang terlampir ini secara mendalam.`;
         }
         
         // --- Eksekusi Gemini ---
