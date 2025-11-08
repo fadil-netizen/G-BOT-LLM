@@ -3,6 +3,7 @@
 require('dotenv').config(); 
 const { GoogleGenAI } = require('@google/genai');
 
+// Kunci API diambil dari file .env
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY; 
 const GOOGLE_SEARCH_ENGINE_ID = process.env.GOOGLE_SEARCH_ENGINE_ID; 
@@ -15,7 +16,7 @@ const ai = new GoogleGenAI(GEMINI_API_KEY);
 
 const chatSessions = new Map();
 const modelMap = new Map();
-const privateChatStatus = new Map(); // Map baru untuk status sesi chat pribadi
+const privateChatStatus = new Map(); // Map untuk status sesi chat pribadi
 
 const MODELS = {
     FAST: 'gemini-2.5-flash', 
@@ -57,7 +58,7 @@ const setting = {
     CHAT_SESSIONS: chatSessions,
     GEMINI_MODEL_MAP: modelMap,
     MODELS: MODELS,
-    PRIVATE_CHAT_STATUS: privateChatStatus, // Status sesi chat pribadi
+    PRIVATE_CHAT_STATUS: privateChatStatus, 
     
     PREFIX: '/', 
 
@@ -74,6 +75,7 @@ Fitur ini ditenagai oleh Google Gemini.
 
 *Fitur Utama*
 - 💬 *Ingatan Otomatis*: Bot mengingat konteks percakapan Anda (kecuali direset).
+- 🎙️ *Analisis Voice Note*: Kirim *Voice Note/Audio* untuk ditranskripsikan, direspons, dan dianalisis.
 - 🖼️ *Multimodal*: Bot bisa menganalisis gambar, *dokumen (PDF, DOCX, XLSX, PPTX, dll)*.
 - 📺 *Analisis YouTube*: Kirim *URL YouTube* untuk ringkasan dan analisis video tanpa batas ukuran file.
 - 📹 *Unggah Video*: Unggah file *video* langsung (maks. 250 MB).
