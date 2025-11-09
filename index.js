@@ -10,7 +10,7 @@ const {
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const setting = require('./setting'); 
-const { GoogleGenAI } = require('@google/genai');
+// const { GoogleGenAI } = require('@google/genai'); // Sudah diimport di setting.js, tidak perlu di sini
 const mammoth = require('mammoth'); 
 const XLSX = require('xlsx'); 
 const pptx2json = require('pptx2json'); 
@@ -53,7 +53,8 @@ async function decodeQrCode(buffer) {
             return null; 
         }
     } catch (error) {
-        return null; 
+        // console.error("Gagal mendecode QR Code, mungkin bukan QR Code:", error.message); 
+        return null; // Return null jika gagal decode (error Jimp/jsQR)
     }
 }
 
@@ -334,9 +335,6 @@ async function handleGeminiRequest(sock, from, textQuery, mediaParts = []) {
              const mediaType = isAudio ? 'voice note/audio' : (mediaPart.fileData ? 'video/URL' : (mediaPart.inlineData?.mimeType.startsWith('image') ? 'gambar' : 'dokumen'));
              
              if (isAudio) {
-                 // PROMPT LAMA:
-                 // finalQuery = `${contextInjection}\n\n*Permintaan Default:*\nTranskripsikan voice note/audio ini ke teks, kemudian balaslah isi pesan tersebut dengan jawaban yang relevan dan personal. Di akhir jawaban Anda, berikan juga transkripsi dan ringkasan VN sebagai referensi.`;
-                 
                  // PROMPT BARU DENGAN INSTRUKSI GOOGLE SEARCH EKSPLISIT:
                  finalQuery = 
                     `${contextInjection}\n\n*Permintaan Default:*\n` +
@@ -493,64 +491,68 @@ async function changeModel(sock, jid, modelKey) {
 
 // Fungsi utama untuk menjalankan bot
 async function startSock() {
-    const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info'); 
-    
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false, 
-    });
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            qrcode.generate(qr, { small: true });
-            console.log("Scan QR code ini dengan WhatsApp kamu!");
-        }
-
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error) ? 
-                (new Boom(lastDisconnect.error)).output.statusCode !== DisconnectReason.loggedOut :
-                true; 
-
-            if (shouldReconnect) {
-                console.log('Koneksi tertutup, mencoba menyambung ulang secara otomatis...');
-                startSock(); 
-            } else {
-                console.log('Koneksi ditutup. Anda telah logout.');
-            }
-        } else if (connection === 'open') {
-            console.log('Bot siap digunakan! Ingatan Otomatis, Multimodal (Gambar, Video & Dokumen, URL YouTube, Audio), Mode Cerdas, dan Google Search Aktif.');
-        }
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    // Event listener untuk pesan masuk
-    sock.ev.on('messages.upsert', async ({ messages }) => {
-        const m = messages[0];
-        if (!m.message || m.key.fromMe) return; 
-
-        const from = m.key.remoteJid;
-        const isGroup = from.endsWith('@g.us');
-
-        const messageType = Object.keys(m.message)[0];
-        // --- AMBIL TEKS MENGGUNAKAN FUNGSI ROBUST ---
-        let messageText = extractMessageText(m); 
-        // ------------------------------------------
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('baileys_auth_info'); 
         
-        const command = messageText.toLowerCase().split(' ')[0];
-        const args = messageText.slice(command.length).trim();
-        const rawText = messageText.trim(); // Untuk pengecekan 1/2
+        const sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false, 
+        });
 
-        // --- LOGIKA PESAN SELAMAT DATANG / SESSION LOCK (Pribadi) ---
-        if (!isGroup) {
-            const currentStatus = PRIVATE_CHAT_STATUS.get(from);
-            
-            // Logika Sambutan Pertama Kali
-            if (!PRIVATE_CHAT_STATUS.has(from) && !CHAT_SESSIONS.has(from) && rawText.length > 0 && !rawText.startsWith(PREFIX)) {
+        sock.ev.on('connection.update', (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                // Tampilkan QR Code hanya saat diminta oleh Baileys
+                qrcode.generate(qr, { small: true });
+                console.log("Scan QR code ini dengan WhatsApp kamu!");
+            }
+
+            if (connection === 'close') {
+                const shouldReconnect = (lastDisconnect.error) ? 
+                    (new Boom(lastDisconnect.error)).output.statusCode !== DisconnectReason.loggedOut :
+                    true; 
+
+                if (shouldReconnect) {
+                    console.log('Koneksi tertutup, mencoba menyambung ulang secara otomatis...');
+                    // Jeda sebentar sebelum mencoba menyambung ulang
+                    setTimeout(() => startSock(), 3000); 
+                } else {
+                    console.log('Koneksi ditutup. Anda telah logout.');
+                }
+            } else if (connection === 'open') {
+                console.log('Bot siap digunakan! Ingatan Otomatis, Multimodal (Gambar, Video & Dokumen, URL YouTube, Audio), Mode Cerdas, dan Google Search Aktif.');
+            }
+        });
+
+        sock.ev.on('creds.update', saveCreds);
+
+        // Event listener untuk pesan masuk DIBUNGKUS DENGAN TRY-CATCH UNTUK STABILITAS
+        sock.ev.on('messages.upsert', async ({ messages }) => {
+            try {
+                const m = messages[0];
+                if (!m.message || m.key.fromMe) return; 
+
+                const from = m.key.remoteJid;
+                const isGroup = from.endsWith('@g.us');
+
+                const messageType = Object.keys(m.message)[0];
+                // --- AMBIL TEKS MENGGUNAKAN FUNGSI ROBUST ---
+                let messageText = extractMessageText(m); 
+                // ------------------------------------------
                 
-                const welcomeMessage = `
+                const command = messageText.toLowerCase().split(' ')[0];
+                const args = messageText.slice(command.length).trim();
+                const rawText = messageText.trim(); // Untuk pengecekan 1/2
+
+                // --- LOGIKA PESAN SELAMAT DATANG / SESSION LOCK (Pribadi) ---
+                if (!isGroup) {
+                    const currentStatus = PRIVATE_CHAT_STATUS.get(from);
+                    
+                    // Logika Sambutan Pertama Kali
+                    if (!PRIVATE_CHAT_STATUS.has(from) && !CHAT_SESSIONS.has(from) && rawText.length > 0 && !rawText.startsWith(PREFIX)) {
+                        
+                        const welcomeMessage = `
 Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
 
     Ketik: \`2\`
@@ -562,250 +564,268 @@ Halo anda telah menghubungi fadil silahkan tunggu saya merespon atau.
 *Petunjuk Singkat:*
 - Untuk bertanya/kirim media dengan chatbot, aktifkan sesi dengan mengetik \`2\` terlebih dahulu.
 - Ketik \`${PREFIX}menu\` untuk melihat daftar fitur lengkap.
-                `.trim();
+                        `.trim();
 
-                await sock.sendMessage(from, { text: welcomeMessage });
-                PRIVATE_CHAT_STATUS.set(from, false); 
-                return;
-            }
+                        await sock.sendMessage(from, { text: welcomeMessage });
+                        PRIVATE_CHAT_STATUS.set(from, false); 
+                        return;
+                    }
 
-            // Logika Session Lock
-            if (rawText === '2') {
-                PRIVATE_CHAT_STATUS.set(from, true);
-                await sock.sendMessage(from, { text: `✅ *Sesi Chatbot Gemini telah diaktifkan!* Anda sekarang bisa langsung bertanya, kirim media, atau URL. Ketik \`1\` untuk keluar dari sesi.` });
-                return; 
-            }
-            if (rawText === '1') {
-                PRIVATE_CHAT_STATUS.set(from, false);
-                CHAT_SESSIONS.delete(from); 
-                await sock.sendMessage(from, { text: `❌ *Sesi Chatbot Gemini telah dinonaktifkan!* Bot akan diam. Ketik \`2\` untuk mengaktifkan sesi lagi.` });
-                return;
-            }
-            
-            // Abaikan jika status non-aktif dan bukan command, dan bukan media/url
-            const isMediaMessage = messageType !== 'conversation' && messageType !== 'extendedTextMessage';
-            const isUrl = rawText.match(/(https?:\/\/(?:www\.)?youtube\.com|youtu\.be)/i);
-            
-            if (currentStatus === false && !messageText.toLowerCase().startsWith(PREFIX) && !isMediaMessage && !isUrl) {
-                return; 
-            }
-        }
-        
-        // --- Penanganan Perintah Khusus (Command Logic) ---
-        
-        if (command === `${PREFIX}norek`) {
-             const imagePath = path.join(__dirname, 'assets', 'norek_info.png'); 
-             const caption = '*Berikut adalah informasi rekening dan QR Code untuk transfer.*';
-             await handleSendImageCommand(sock, from, imagePath, caption);
-             return;
-        }
-        if (command === `${PREFIX}menu`) {
-            await sock.sendMessage(from, { text: setting.GEMINI_MENU });
-            return;
-        }
-        if (command === `${PREFIX}reset`) {
-            await resetUserMemory(sock, from);
-            return;
-        }
-        if (command === `${PREFIX}flash` || command === `${PREFIX}fast`) {
-            await changeModel(sock, from, 'FAST');
-            return;
-        }
-        if (command === `${PREFIX}pro` || command === `${PREFIX}smart`) {
-            await changeModel(sock, from, 'SMART');
-            return;
-        }
-        if (command === `${PREFIX}draw` || command === `${PREFIX}gambar`) {
-            if (args.length > 0) {
-                await handleImageGeneration(sock, from, args);
-            } else {
-                await sock.sendMessage(from, { text: "Mohon berikan deskripsi gambar yang ingin Anda buat, contoh: `"+ PREFIX +"draw seekor anjing astronaut di luar angkasa`" });
-            }
-            return;
-        }
-        
-        // ----------------------------------------------------------------------
-        // --- LOGIKA PEMROSESAN QUERY (FINAL) ---
-        // ----------------------------------------------------------------------
-        
-        let queryText = messageText;
-        let mediaParts = [];
-        let isGeminiQuery = false;
-        let documentExtractedText = null; 
-
-        // A. LOGIKA UTAMA PENENTUAN APakah BOT HARUS MERESPONS 
-        const isMentionedInGroup = isGroup && isBotMentioned(m, sock);
-        const isSessionActiveInPrivate = !isGroup && PRIVATE_CHAT_STATUS.get(from) === true;
-        
-        // Set isGeminiQuery: Bot merespons jika:
-        // 1. Di grup DAN di-mention.
-        // 2. Di chat pribadi DAN sesi aktif.
-        if (isMentionedInGroup || isSessionActiveInPrivate) {
-            isGeminiQuery = true;
-        } else if (isGroup) {
-            return; // Di grup dan tidak di-mention, abaikan
-        }
-
-        if (isMentionedInGroup) {
-            // --- LOGIKA PENGHAPUSAN MENTION ---
-            const botJidRaw = sock.user?.id?.split(':')[0]; 
-            if (botJidRaw) {
-                // Regex untuk menghapus @[nomorbot] di mana pun dalam teks
-                const mentionRegex = new RegExp(`@${botJidRaw}`, 'g');
-                queryText = queryText.replace(mentionRegex, '').trim();
-            }
-        } 
-        
-        // Helper untuk download dan pengecekan ukuran media
-        const downloadAndCheckSize = async (msg, type) => {
-            if (msg.fileLength > MAX_MEDIA_SIZE_BYTES) {
-                 await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran file (${type}) melebihi batas maksimum *${(MAX_MEDIA_SIZE_BYTES / 1024 / 1024).toFixed(0)} MB*.` });
-                 return null;
-            }
-            await sock.sendPresenceUpdate('composing', from); 
-            const stream = await downloadContentFromMessage(msg, type);
-            let buffer = Buffer.from([]);
-            for await (const chunk of stream) {
-                buffer = Buffer.concat([buffer, chunk]);
-            }
-            return buffer;
-        };
-        
-        // A1. Pesan Gambar Langsung atau Balasan Gambar
-        if (messageType === 'imageMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
-             isGeminiQuery = true; // Set query flag jika ada media
-             const imageMsg = messageType === 'imageMessage' ? m.message.imageMessage : m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
-             const buffer = await downloadAndCheckSize(imageMsg, 'image');
-
-             if (!buffer) { await sock.sendPresenceUpdate('available', from); return; }
-             
-             const qrData = await decodeQrCode(buffer);
-             if (qrData) {
-                 await sock.sendMessage(from, { text: `*✅ QR Code Ditemukan!*:\n\`\`\`\n${qrData}\n\`\`\`` });
-                 const qrPrompt = `QR Code di gambar ini berisi data: "${qrData}". Analisis data QR Code ini dan juga gambar keseluruhan, lalu balas pesan ini.`;
-                 queryText = queryText.length > 0 ? `${qrPrompt}\n\n*Instruksi Pengguna Tambahan:*\n${queryText}` : qrPrompt;
-             }
-             
-             mediaParts.push(bufferToGenerativePart(buffer, imageMsg.mimetype));
-        }
-        
-        // A2. Pesan Video Langsung atau Balasan Video
-        else if (messageType === 'videoMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.videoMessage) {
-            isGeminiQuery = true; // Set query flag jika ada media
-            const videoMsg = messageType === 'videoMessage' ? m.message.videoMessage : m.message.extendedTextMessage.contextInfo.quotedMessage.videoMessage;
-            const buffer = await downloadAndCheckSize(videoMsg, 'video');
-            
-            if (!buffer) { await sock.sendPresenceUpdate('available', from); return; }
-            
-            console.log(`[VIDEO] Menerima video: ${videoMsg.mimetype}, ukuran: ${buffer.length} bytes`);
-            mediaParts.push(bufferToGenerativePart(buffer, videoMsg.mimetype));
-        }
-        
-        // B. Pemrosesan Dokumen
-        else if (messageType === 'documentMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.documentMessage) {
-            const documentMsg = messageType === 'documentMessage' 
-                ? m.message.documentMessage 
-                : m.message.extendedTextMessage.contextInfo.quotedMessage.documentMessage;
-
-            const mimeType = documentMsg.mimetype;
-            
-            if (documentMsg.fileLength > MAX_DOC_SIZE_BYTES) {
-                await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran dokumen melebihi batas maksimum *${(MAX_DOC_SIZE_BYTES / 1024 / 1024).toFixed(0)} MB*.` });
-                await sock.sendPresenceUpdate('available', from);
-                return;
-            }
-
-            // List mime types yang didukung (diperpendek untuk efisiensi)
-            const isSupported = mimeType.includes('pdf') || mimeType.includes('text') || mimeType.includes('json') || mimeType.includes('wordprocessingml') || mimeType.includes('msword') || mimeType.includes('spreadsheetml') || mimeType.includes('presentationml');
-
-            if (isSupported) {
-                isGeminiQuery = true; // Set query flag jika ada media/dokumen
-                await sock.sendPresenceUpdate('composing', from); 
-
-                const stream = await downloadContentFromMessage(documentMsg, 'document');
-                let buffer = Buffer.from([]);
-                for await (const chunk of stream) {
-                    buffer = Buffer.concat([buffer, chunk]);
+                    // Logika Session Lock
+                    if (rawText === '2') {
+                        PRIVATE_CHAT_STATUS.set(from, true);
+                        await sock.sendMessage(from, { text: `✅ *Sesi Chatbot Gemini telah diaktifkan!* Anda sekarang bisa langsung bertanya, kirim media, atau URL. Ketik \`1\` untuk keluar dari sesi.` });
+                        return; 
+                    }
+                    if (rawText === '1') {
+                        PRIVATE_CHAT_STATUS.set(from, false);
+                        CHAT_SESSIONS.delete(from); 
+                        await sock.sendMessage(from, { text: `❌ *Sesi Chatbot Gemini telah dinonaktifkan!* Bot akan diam. Ketik \`2\` untuk mengaktifkan sesi lagi.` });
+                        return;
+                    }
+                    
+                    // Abaikan jika status non-aktif dan bukan command, dan bukan media/url
+                    const isMediaMessage = messageType !== 'conversation' && messageType !== 'extendedTextMessage';
+                    const isUrl = rawText.match(/(https?:\/\/(?:www\.)?youtube\.com|youtu\.be)/i);
+                    
+                    if (currentStatus === false && !messageText.toLowerCase().startsWith(PREFIX) && !isMediaMessage && !isUrl) {
+                        return; 
+                    }
                 }
                 
-                documentExtractedText = await extractTextFromDocument(buffer, mimeType);
+                // --- Penanganan Perintah Khusus (Command Logic) ---
                 
-                if (!documentExtractedText) {
-                    mediaParts.push(bufferToGenerativePart(buffer, mimeType));
-                    console.log(`[GEMINI API] File ${mimeType} dikirim langsung ke Gemini API.`);
+                if (command === `${PREFIX}norek`) {
+                    const imagePath = path.join(__dirname, 'assets', 'norek_info.png'); 
+                    const caption = '*Berikut adalah informasi rekening dan QR Code untuk transfer.*';
+                    await handleSendImageCommand(sock, from, imagePath, caption);
+                    return;
+                }
+                if (command === `${PREFIX}menu`) {
+                    await sock.sendMessage(from, { text: setting.GEMINI_MENU });
+                    return;
+                }
+                if (command === `${PREFIX}reset`) {
+                    await resetUserMemory(sock, from);
+                    return;
+                }
+                if (command === `${PREFIX}flash` || command === `${PREFIX}fast`) {
+                    await changeModel(sock, from, 'FAST');
+                    return;
+                }
+                if (command === `${PREFIX}pro` || command === `${PREFIX}smart`) {
+                    await changeModel(sock, from, 'SMART');
+                    return;
+                }
+                if (command === `${PREFIX}draw` || command === `${PREFIX}gambar`) {
+                    if (args.length > 0) {
+                        await handleImageGeneration(sock, from, args);
+                    } else {
+                        await sock.sendMessage(from, { text: "Mohon berikan deskripsi gambar yang ingin Anda buat, contoh: `"+ PREFIX +"draw seekor anjing astronaut di luar angkasa`" });
+                    }
+                    return;
+                }
+                
+                // ----------------------------------------------------------------------
+                // --- LOGIKA PEMROSESAN QUERY (FINAL) ---
+                // ----------------------------------------------------------------------
+                
+                let queryText = messageText;
+                let mediaParts = [];
+                let isGeminiQuery = false;
+                let documentExtractedText = null; 
+
+                // A. LOGIKA UTAMA PENENTUAN APakah BOT HARUS MERESPONS 
+                const isMentionedInGroup = isGroup && isBotMentioned(m, sock);
+                const isSessionActiveInPrivate = !isGroup && PRIVATE_CHAT_STATUS.get(from) === true;
+                
+                // Set isGeminiQuery: Bot merespons jika:
+                // 1. Di grup DAN di-mention.
+                // 2. Di chat pribadi DAN sesi aktif.
+                if (isMentionedInGroup || isSessionActiveInPrivate) {
+                    isGeminiQuery = true;
+                } else if (isGroup) {
+                    return; // Di grup dan tidak di-mention, abaikan
                 }
 
-            } else {
-                await sock.sendMessage(from, { text: `⚠️ Maaf, tipe file dokumen \`${mimeType}\` belum didukung. Hanya mendukung *PDF, TXT, DOCX/DOC, XLSX/XLS, PPTX*, dan berbagai tipe file *kode/teks* lainnya.` });
-                await sock.sendPresenceUpdate('available', from);
-                return;
-            }
-        }
-        
-        // C. Deteksi Voice Note/Audio (AKTIF)
-        else if (messageType === 'audioMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage) {
-            const audioMsg = messageType === 'audioMessage' 
-                ? m.message.audioMessage 
-                : m.message.extendedTextMessage.contextInfo.quotedMessage.audioMessage;
-            
-            if (audioMsg.mimetype.includes('audio')) {
-                isGeminiQuery = true; // Set query flag jika ada media
-                const buffer = await downloadAndCheckSize(audioMsg, 'audio');
+                if (isMentionedInGroup) {
+                    // --- LOGIKA PENGHAPUSAN MENTION ---
+                    const botJidRaw = sock.user?.id?.split(':')[0]; 
+                    if (botJidRaw) {
+                        // Regex untuk menghapus @[nomorbot] di mana pun dalam teks
+                        const mentionRegex = new RegExp(`@${botJidRaw}`, 'g');
+                        queryText = queryText.replace(mentionRegex, '').trim();
+                    }
+                } 
                 
-                if (!buffer) { await sock.sendPresenceUpdate('available', from); return; }
-                
-                console.log(`[AUDIO ANALYZER] Menerima Voice Note: ${audioMsg.mimetype}, ukuran: ${buffer.length} bytes`);
-                
-                mediaParts.push(bufferToGenerativePart(buffer, audioMsg.mimetype));
-                
-                // Prompt Interaktif Default untuk Audio (Hanya diterapkan jika query teks kosong)
-                if (queryText.length === 0) {
-                     // *** MODIFIKASI PROMPT EKSPLISIT UNTUK MENGGUNAKAN GOOGLE SEARCH ***
-                     queryText = (
-                        'Transkripsikan voice note/audio ini ke teks. ' +
-                        '*WAJIB*: Jika konten transkripsi berisi pertanyaan yang memerlukan fakta, data terbaru, atau informasi eksternal (misalnya: berita, harga, cuaca), *Gunakan Tool Google Search* untuk mendapatkan jawaban yang akurat. ' +
-                        'Setelah itu, balaslah isi pesan tersebut dengan jawaban yang relevan dan personal. Di akhir jawaban Anda, berikan juga transkripsi dan ringkasan Voice Note sebagai referensi.'
-                     );
-                     // ***************************************************************
-                }
-            }
-        }
-        
-        // D. Deteksi URL YouTube 
-        const youtubeUrl = extractYoutubeUrl(queryText);
-        let youtubePart = null;
-        
-        if (youtubeUrl) {
-             isGeminiQuery = true; // Set query flag jika ada URL
-             youtubePart = uriToGenerativePart(youtubeUrl, 'video/youtube'); 
-             mediaParts.push(youtubePart);
-             queryText = queryText.replace(youtubeUrl, '').trim(); 
-        }
+                // Helper untuk download dan pengecekan ukuran media
+                const downloadAndCheckSize = async (msg, type) => {
+                    // Menggunakan fileLength yang aman (bisa null/undefined)
+                    const fileSize = msg.fileLength ? Number(msg.fileLength) : 0;
+                    const maxSize = type === 'document' ? MAX_DOC_SIZE_BYTES : MAX_MEDIA_SIZE_BYTES;
 
-        // E. Perintah Teks dan Gabungkan Query
-        if (documentExtractedText) {
-             queryText = `${documentExtractedText}\n\n*Permintaan Analisis Pengguna:*\n${queryText.length > 0 ? queryText : 'Mohon analisis dokumen ini.'}`;
-        } else if (youtubePart && queryText.length === 0) {
-             queryText = 'Mohon berikan ringkasan yang detail dan analisis mendalam dari video YouTube ini. Sertakan poin-poin penting dan kesimpulan.';
-        } else if (mediaParts.length > 0 && queryText.length === 0) {
-             const mediaType = mediaParts[0].inlineData?.mimeType.startsWith('image') ? 'gambar' : 'dokumen/file';
-             if (mediaType !== 'voice note/audio') {
-                 queryText = `Mohon analisis ${mediaType} yang terlampir ini secara mendalam.`;
-             }
-        }
-        
-        // --- Eksekusi Gemini ---
-        // Final check: Pastikan bot merespons jika isGeminiQuery true ATAU ada query teks
-        if (isGeminiQuery || queryText.length > 0) {
-            await handleGeminiRequest(sock, from, queryText, mediaParts);
-            return;
-        }
-        
-        if (messageType !== 'conversation' && messageType !== 'extendedTextMessage') {
-             console.log(`[SKIP] Pesan non-teks/non-media yang tidak didukung: ${messageType}`);
-             await sock.sendPresenceUpdate('available', from);
-        }
-    });
+                    if (fileSize > maxSize) {
+                        await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran file (${type}) melebihi batas maksimum *${(maxSize / 1024 / 1024).toFixed(0)} MB*.` });
+                        return null;
+                    }
+                    await sock.sendPresenceUpdate('composing', from); 
+                    const stream = await downloadContentFromMessage(msg, type);
+                    let buffer = Buffer.from([]);
+                    for await (const chunk of stream) {
+                        buffer = Buffer.concat([buffer, chunk]);
+                    }
+                    return buffer;
+                };
+                
+                // A1. Pesan Gambar Langsung atau Balasan Gambar
+                if (messageType === 'imageMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage) {
+                    isGeminiQuery = true; // Set query flag jika ada media
+                    const imageMsg = messageType === 'imageMessage' ? m.message.imageMessage : m.message.extendedTextMessage.contextInfo.quotedMessage.imageMessage;
+                    const buffer = await downloadAndCheckSize(imageMsg, 'image');
+
+                    if (!buffer) { await sock.sendPresenceUpdate('available', from); return; }
+                    
+                    const qrData = await decodeQrCode(buffer);
+                    if (qrData) {
+                        await sock.sendMessage(from, { text: `*✅ QR Code Ditemukan!*:\n\`\`\`\n${qrData}\n\`\`\`` });
+                        const qrPrompt = `QR Code di gambar ini berisi data: "${qrData}". Analisis data QR Code ini dan juga gambar keseluruhan, lalu balas pesan ini.`;
+                        queryText = queryText.length > 0 ? `${qrPrompt}\n\n*Instruksi Pengguna Tambahan:*\n${queryText}` : qrPrompt;
+                    }
+                    
+                    mediaParts.push(bufferToGenerativePart(buffer, imageMsg.mimetype));
+                }
+                
+                // A2. Pesan Video Langsung atau Balasan Video
+                else if (messageType === 'videoMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.videoMessage) {
+                    isGeminiQuery = true; // Set query flag jika ada media
+                    const videoMsg = messageType === 'videoMessage' ? m.message.videoMessage : m.message.extendedTextMessage.contextInfo.quotedMessage.videoMessage;
+                    const buffer = await downloadAndCheckSize(videoMsg, 'video');
+                    
+                    if (!buffer) { await sock.sendPresenceUpdate('available', from); return; }
+                    
+                    console.log(`[VIDEO] Menerima video: ${videoMsg.mimetype}, ukuran: ${buffer.length} bytes`);
+                    mediaParts.push(bufferToGenerativePart(buffer, videoMsg.mimetype));
+                }
+                
+                // B. Pemrosesan Dokumen
+                else if (messageType === 'documentMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.documentMessage) {
+                    const documentMsg = messageType === 'documentMessage' 
+                        ? m.message.documentMessage 
+                        : m.message.extendedTextMessage.contextInfo.quotedMessage.documentMessage;
+
+                    const mimeType = documentMsg.mimetype;
+                    
+                    if (documentMsg.fileLength > MAX_DOC_SIZE_BYTES) {
+                        await sock.sendMessage(from, { text: `⚠️ Maaf, ukuran dokumen melebihi batas maksimum *${(MAX_DOC_SIZE_BYTES / 1024 / 1024).toFixed(0)} MB*.` });
+                        await sock.sendPresenceUpdate('available', from);
+                        return;
+                    }
+
+                    // List mime types yang didukung (diperpendek untuk efisiensi)
+                    const isSupported = mimeType.includes('pdf') || mimeType.includes('text') || mimeType.includes('json') || mimeType.includes('wordprocessingml') || mimeType.includes('msword') || mimeType.includes('spreadsheetml') || mimeType.includes('presentationml');
+
+                    if (isSupported) {
+                        isGeminiQuery = true; // Set query flag jika ada media/dokumen
+                        await sock.sendPresenceUpdate('composing', from); 
+
+                        const stream = await downloadContentFromMessage(documentMsg, 'document');
+                        let buffer = Buffer.from([]);
+                        for await (const chunk of stream) {
+                            buffer = Buffer.concat([buffer, chunk]);
+                        }
+                        
+                        documentExtractedText = await extractTextFromDocument(buffer, mimeType);
+                        
+                        if (!documentExtractedText) {
+                            mediaParts.push(bufferToGenerativePart(buffer, mimeType));
+                            console.log(`[GEMINI API] File ${mimeType} dikirim langsung ke Gemini API.`);
+                        }
+
+                    } else {
+                        await sock.sendMessage(from, { text: `⚠️ Maaf, tipe file dokumen \`${mimeType}\` belum didukung. Hanya mendukung *PDF, TXT, DOCX/DOC, XLSX/XLS, PPTX*, dan berbagai tipe file *kode/teks* lainnya.` });
+                        await sock.sendPresenceUpdate('available', from);
+                        return;
+                    }
+                }
+                
+                // C. Deteksi Voice Note/Audio (AKTIF)
+                else if (messageType === 'audioMessage' || m.message?.extendedTextMessage?.contextInfo?.quotedMessage?.audioMessage) {
+                    const audioMsg = messageType === 'audioMessage' 
+                        ? m.message.audioMessage 
+                        : m.message.extendedTextMessage.contextInfo.quotedMessage.audioMessage;
+                    
+                    if (audioMsg.mimetype.includes('audio')) {
+                        isGeminiQuery = true; // Set query flag jika ada media
+                        const buffer = await downloadAndCheckSize(audioMsg, 'audio');
+                        
+                        if (!buffer) { await sock.sendPresenceUpdate('available', from); return; }
+                        
+                        console.log(`[AUDIO ANALYZER] Menerima Voice Note: ${audioMsg.mimetype}, ukuran: ${buffer.length} bytes`);
+                        
+                        mediaParts.push(bufferToGenerativePart(buffer, audioMsg.mimetype));
+                        
+                        // Prompt Interaktif Default untuk Audio (Hanya diterapkan jika query teks kosong)
+                        if (queryText.length === 0) {
+                            // *** MODIFIKASI PROMPT EKSPLISIT UNTUK MENGGUNAKAN GOOGLE SEARCH ***
+                            queryText = (
+                                'Transkripsikan voice note/audio ini ke teks. ' +
+                                '*WAJIB*: Jika konten transkripsi berisi pertanyaan yang memerlukan fakta, data terbaru, atau informasi eksternal (misalnya: berita, harga, cuaca), *Gunakan Tool Google Search* untuk mendapatkan jawaban yang akurat. ' +
+                                'Setelah itu, balaslah isi pesan tersebut dengan jawaban yang relevan dan personal. Di akhir jawaban Anda, berikan juga transkripsi dan ringkasan Voice Note sebagai referensi.'
+                            );
+                            // ***************************************************************
+                        }
+                    }
+                }
+                
+                // D. Deteksi URL YouTube 
+                const youtubeUrl = extractYoutubeUrl(queryText);
+                let youtubePart = null;
+                
+                if (youtubeUrl) {
+                    isGeminiQuery = true; // Set query flag jika ada URL
+                    youtubePart = uriToGenerativePart(youtubeUrl, 'video/youtube'); 
+                    mediaParts.push(youtubePart);
+                    queryText = queryText.replace(youtubeUrl, '').trim(); 
+                }
+
+                // E. Perintah Teks dan Gabungkan Query
+                if (documentExtractedText) {
+                    queryText = `${documentExtractedText}\n\n*Permintaan Analisis Pengguna:*\n${queryText.length > 0 ? queryText : 'Mohon analisis dokumen ini.'}`;
+                } else if (youtubePart && queryText.length === 0) {
+                    queryText = 'Mohon berikan ringkasan yang detail dan analisis mendalam dari video YouTube ini. Sertakan poin-poin penting dan kesimpulan.';
+                } else if (mediaParts.length > 0 && queryText.length === 0) {
+                    const mediaType = mediaParts[0].inlineData?.mimeType.startsWith('image') ? 'gambar' : 'dokumen/file';
+                    if (mediaType !== 'voice note/audio') {
+                        queryText = `Mohon analisis ${mediaType} yang terlampir ini secara mendalam.`;
+                    }
+                }
+                
+                // --- Eksekusi Gemini ---
+                // Final check: Pastikan bot merespons jika isGeminiQuery true ATAU ada query teks
+                if (isGeminiQuery || queryText.length > 0) {
+                    await handleGeminiRequest(sock, from, queryText, mediaParts);
+                    return;
+                }
+                
+                if (messageType !== 'conversation' && messageType !== 'extendedTextMessage') {
+                    console.log(`[SKIP] Pesan non-teks/non-media yang tidak didukung: ${messageType}`);
+                    await sock.sendPresenceUpdate('available', from);
+                }
+
+            } catch (e) {
+                // Jaring pengaman terakhir untuk mencegah bot mati total
+                console.error("-----------------------------------------------------");
+                console.error("🚨 CRITICAL: UNHANDLED ERROR IN MESSAGES.UPSERT:", e);
+                console.error("-----------------------------------------------------");
+                // Tidak perlu mengirim pesan balasan karena ini adalah error internal
+            }
+        });
+
+    } catch (error) {
+        console.error("-----------------------------------------------------");
+        console.error("🚨 CRITICAL: GAGAL INISIALISASI BOT:", error);
+        console.error("-----------------------------------------------------");
+    }
 }
 
 // Jalankan bot
