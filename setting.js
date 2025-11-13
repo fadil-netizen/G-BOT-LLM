@@ -1,110 +1,104 @@
 // setting.js
 
-require('dotenv').config(); 
 const { GoogleGenAI } = require('@google/genai');
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
-// Kunci API diambil dari file .env
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY; 
-const GOOGLE_SEARCH_ENGINE_ID = process.env.GOOGLE_SEARCH_ENGINE_ID; 
+// --- KONFIGURASI BOT INTI ---
+const PREFIX = '!'; // Awalan perintah bot
+// 💡 TEMPAT MENGISI NOMOR: Ganti '6287876611960@s.whatsapp.net' dengan nomor JID Anda
+const TARGET_JID = '6287876611960@s.whatsapp.net'; // Nomor tujuan Laporan Status (087876611960)
 
-if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY tidak ditemukan di file .env. Mohon isi kunci API Anda.");
-}
+// --- KONFIGURASI GEMINI ---
 
-const ai = new GoogleGenAI(GEMINI_API_KEY);
+// Ambil kunci API dari file .env
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY; 
 
-const chatSessions = new Map();
-const modelMap = new Map();
-const privateChatStatus = new Map(); // Map untuk status sesi chat pribadi
+// Inisialisasi GoogleGenAI (Agent Mole)
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+
+// Konfigurasi Google Search Tool
+const GOOGLE_SEARCH_CONFIG = {
+    apiKey: process.env.GOOGLE_SEARCH_API_KEY,
+    cx: process.env.GOOGLE_SEARCH_ENGINE_ID,
+    // Tambahkan domain pencarian spesifik di sini (opsional)
+    // restrict: 'site:kaskus.co.id,site:facebook.com' 
+};
+
+
+// --- PENGELOLAAN MODEL & SESI ---
 
 const MODELS = {
-    FAST: 'gemini-2.5-flash', 
-    SMART: 'gemini-2.5-pro',  
-    IMAGE_GEN: 'gemini-2.5-flash-image', 
-    DEFAULT: 'gemini-2.5-flash'
+    FAST: 'gemini-2.5-flash',
+    SMART: 'gemini-2.5-pro',
+    IMAGE_GEN: 'imagen-3.0-generate-002', // Model untuk perintah !draw
+    DEFAULT: 'gemini-2.5-flash', // Model default saat sesi dimulai
 };
 
-// Instruksi System Khusus untuk Smart Mode (Analisis Mendalam)
-const SMART_MODE_SYSTEM_INSTRUCTION = (
-    "Anda adalah asisten AI dengan kecerdasan visual dan penalaran dokumen yang SANGAT TINGGI (Smart Mode). " +
-    "Tujuan Anda adalah memberikan analisis yang sangat detail, panjang, terstruktur, dan komprehensif. " +
-    "Jika respons Anda mengandung:\n" +
-    "1. Kode program, perintah terminal, atau data tabular (tabel).\n" +
-    "2. *Rumus Matematika* (misalnya: persamaan aljabar, kalkulus, statistik).\n" +
-    "3. *Rumus Kimia* (misalnya: persamaan reaksi, struktur sederhana, notasi teknis).\n" +
-    "4. Teks teknis lainnya yang melibatkan simbol, subskrip, atau superskrip.\n" +
-    "\n" +
-    "Anda *SELALU* harus menyertakannya dalam *Code Block* (menggunakan 3 backtick ``` ) agar teks tersebut rapi, mudah disalin, dan tidak rusak oleh pemformatan chat. " +
-    "Di dalam Code Block, gunakan notasi yang paling jelas: *boleh menggunakan simbol Unicode* seperti subskrip (misalnya: *H₂O* atau *C₆H₁₂O₆*) atau superskrip (misalnya: *x²* atau *e⁺*), tetapi *hindari sintaks LaTeX formal* (seperti $...$) yang tidak dapat ditampilkan di WhatsApp.\n" +
-    "Untuk analisis gambar, ikuti format ini secara ketat:\n" +
-    "*1. Observasi Visual Detail*\n" +
-    "   - Buat minimal 5 poin observasi terperinci tentang elemen, warna, komposisi, dan subjek dalam gambar.\n" +
-    "\n" +
-    "*2. Inferensi dan Analisis Mendalam*\n" +
-    "   - Jelaskan makna, konteks, fungsi, atau tujuan dari gambar tersebut. Gunakan penalaran yang kuat.\n" +
-    "\n" +
-    "*3. Kesimpulan Komprehensif*\n" +
-    "   - Berikan ringkasan yang jelas dan tuntas.\n" +
-    "Semua output Anda harus menggunakan pemformatan *bold* untuk subjudul dan *daftar poin* untuk kejelasan, JANGAN gunakan simbol pagar (#, ##, ###) di awal baris."
-).trim();
+const CHAT_SESSIONS = new Map(); // Untuk menyimpan objek chat Gemini per pengguna (memori)
+const GEMINI_MODEL_MAP = new Map(); // Untuk menyimpan preferensi model per pengguna
+const PRIVATE_CHAT_STATUS = new Map(); // Untuk mengontrol sesi chatbot di chat pribadi (true/false)
 
+// Instruksi System untuk Smart Mode (Mode Agen Forensik)
+const SMART_MODE_SYSTEM_INSTRUCTION = `
+Anda adalah **Agent Mole**, sebuah kecerdasan buatan spesialis forensik digital dan intelijen yang dikembangkan oleh FADIL. Tugas Anda adalah membantu penyelidikan kasus kriminal, penipuan, ancaman keamanan, dan informasi gelap di internet.
 
-const setting = {
-    GEMINI_API_KEY: GEMINI_API_KEY,
-    GEMINI_AI_INSTANCE: ai,
-    SMART_MODE_SYSTEM_INSTRUCTION: SMART_MODE_SYSTEM_INSTRUCTION, 
-    
-    CHAT_SESSIONS: chatSessions,
-    GEMINI_MODEL_MAP: modelMap,
-    MODELS: MODELS,
-    PRIVATE_CHAT_STATUS: privateChatStatus, 
-    
-    PREFIX: '/', 
+**Peran dan Gaya Respons:**
+1.  **Profesional & Terstruktur:** Berikan jawaban yang mendalam, logis, dan terorganisir seperti laporan intelijen.
+2.  **Multimodal:** Menganalisis gambar, video (melalui URL YouTube), dokumen (PDF, DOCX, XLSX, PPTX), dan pesan suara untuk bukti dan konteks.
+3.  **Akses Data:**
+    * Anda memiliki akses ke **Google Search Tool** untuk fakta, berita, dan informasi publik terkini. **Gunakan tool ini secara agresif** untuk memverifikasi data dan mencari detail insiden.
+    * Anda memiliki **akses simulasi ke jaringan Tor/Dark Web**. Jika pengguna mencari \`.onion\` atau topik kriminal/gelap (contoh: *pasar gelap, data bocor, skema penipuan*), lakukan fungsi \`torSearch\` (kode telah disuntikkan). Analisis hasil yang diberikan oleh \`torSearch\` untuk mendapatkan konteks, BUKAN mencoba mengakses tautan tersebut secara langsung.
+4.  **Batas Etika & Hukum:** Jangan pernah membantu aktivitas ilegal. Tolak permintaan yang melibatkan:
+    * Pencurian data/akun (hacking).
+    * Pembuatan materi berbahaya (bom, senjata, racun).
+    * Konten dewasa eksplisit.
+    * Pelanggaran hak cipta.
+    * Informasi pribadi yang sensitif (Doxing) tanpa konteks publik yang jelas.
+5.  **Perintah:**
+    * \`!reset\` : Hapus ingatan percakapan.
+    * \`!pro\` atau \`!smart\` : Ganti ke Model Pro.
+    * \`!flash\` atau \`!fast\` : Ganti ke Model Fast.
+    * \`!draw [prompt]\` : Buat gambar.
+    * \`!norek\` : Kirim informasi rekening.
+`;
 
-    GOOGLE_SEARCH_CONFIG: {
-        apiKey: GOOGLE_SEARCH_API_KEY, 
-        cx: GOOGLE_SEARCH_ENGINE_ID, 
-    },
+// Menu Bantuan
+const GEMINI_MENU = `
+*--- 🕵️ MENU AGENT MOLE 2.5 ---*
 
-    GEMINI_MENU: `
-*Menu Bot Gemini AI*
+Halo! Saya Agent Mole, spesialis forensik digital, siap membantu penyelidikan Anda.
 
-Fitur ini ditenagai oleh Google Gemini.
----
+*Mode Aktif Saat Ini:* Menggunakan sistem ingatan.
 
-*Fitur Utama*
-- 💬 *Ingatan Otomatis*: Bot mengingat konteks percakapan Anda (kecuali direset).
-- 🎙️ *Analisis Voice Note*: Kirim *Voice Note/Audio* untuk ditranskripsikan, direspons, dan dianalisis.
-- 🖼️ *Multimodal*: Bot bisa menganalisis gambar, *dokumen (PDF, DOCX, XLSX, PPTX, dll)*.
-- 📺 *Analisis YouTube*: Kirim *URL YouTube* untuk ringkasan dan analisis video tanpa batas ukuran file.
-- 📹 *Unggah Video*: Unggah file *video* langsung (maks. 250 MB).
-- 💻 *Dukungan Kode/File Teks*: Mampu menganalisis file kode (*.js, .py, .html*) dan file teks kustom (*.mcx-5, .log, dll.*) hingga *100 MB*.
-- 🌐 *Real-time Info*: Bot dapat mencari informasi terbaru menggunakan Google Search Tool.
+*🤖 Perintah Chat & Bantuan:*
+* \`${PREFIX}menu\` : Menampilkan menu ini.
+* \`${PREFIX}reset\` : Menghapus semua riwayat percakapan/ingatan bot dengan Anda. (WAJIB jika bot mulai ngaco).
+* \`${PREFIX}norek\` : Mengirimkan gambar informasi rekening untuk transaksi.
 
-*⚙️ Pengaturan Mode Kecerdasan*
-Model default saat ini: \`gemini-2.5-flash\`
+*⚙️ Pengaturan Model (Ganti Kecerdasan):*
+* \`${PREFIX}fast\` / \`${PREFIX}flash\` : Menggunakan *Gemini 2.5 Flash* (Respon cepat, efisien, ideal untuk pertanyaan umum/ringan).
+* \`${PREFIX}smart\` / \`${PREFIX}pro\` : Menggunakan *Gemini 2.5 Pro* (Analisis mendalam, penalaran kompleks, cocok untuk investigasi).
 
-1. *Fast Mode* (Cepat)
-   - Perintah: \`/flash\` atau \`/fast\`
-   - Model: \`gemini-2.5-flash\`
-   > Cocok untuk jawaban cepat, ringkasan, dan obrolan biasa.
+*🖼️ Pembuatan Gambar (AI Image Generation):*
+* \`${PREFIX}draw [deskripsi]\` : Membuat gambar berdasarkan deskripsi yang Anda berikan. Contoh: \`${PREFIX}draw seekor anjing detektif mengenakan topi fedora, gaya noir.\`
 
-2. *Smart Mode* (Cerdas)
-   - Perintah: \`/pro\` atau \`/smart\`
-   - Model: \`gemini-2.5-pro\`
-   > Cocok untuk penalaran mendalam, analisis gambar detail, dan tugas yang butuh kecermatan tinggi. Output lebih panjang dan jelas, *terutama untuk rumus dan kode*.
+*Tips Investigasi:*
+1.  Untuk hasil maksimal, aktifkan mode \`${PREFIX}smart\` sebelum memulai analisis kasus yang kompleks.
+2.  Bot secara otomatis menggunakan *Google Search* untuk mencari info terkini, *Dark Web Search (Tor)* untuk tautan \`.onion\`, dan menganalisis *Gambar, Video (YouTube), Dokumen* (PDF, DOCX, XLSX, PPTX), dan *Pesan Suara*.
+3.  Di chat pribadi, pastikan sesi aktif (\`2\` telah diketik) agar bot merespons tanpa perlu di-tag.
+`;
 
-*🎨 Pembuatan Gambar (Text-to-Image)*
-- Perintah: \`/draw [prompt]\` atau \`/gambar [prompt]\`
-    > Contoh: \`/draw seekor anjing astronaut di luar angkasa\`
-
-*🧹 Perintah Khusus*
-- \`/reset\` : Hapus semua ingatan riwayat percakapan Anda saat ini.
-- \`/menu\` : Tampilkan menu ini.
-- \`/norek\` : Tampilkan informasi rekening.
-- *Chat Pribadi*: Ketik \`2\` untuk mengaktifkan bot, dan \`1\` untuk mematikan bot.
-    `.trim()
+// Eksport semua konstanta yang dibutuhkan oleh index.js
+module.exports = {
+    MOLE_AI_INSTANCE: ai,
+    PREFIX,
+    CHAT_SESSIONS,
+    GEMINI_MODEL_MAP,
+    MODELS,
+    SMART_MODE_SYSTEM_INSTRUCTION,
+    GOOGLE_SEARCH_CONFIG,
+    TARGET_JID,
+    GEMINI_MENU,
+    PRIVATE_CHAT_STATUS
 };
-
-module.exports = setting;
